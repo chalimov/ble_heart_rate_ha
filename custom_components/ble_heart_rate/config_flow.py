@@ -7,7 +7,7 @@ from homeassistant.components.bluetooth import (
     BluetoothServiceInfoBleak,
     async_discovered_service_info,
 )
-from homeassistant.config_entries import ConfigFlow
+from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
 from homeassistant.const import CONF_ADDRESS, CONF_NAME
 
 from .const import DOMAIN, HR_SERVICE_UUID
@@ -25,7 +25,7 @@ class BleHeartRateConfigFlow(ConfigFlow, domain=DOMAIN):
 
     async def async_step_bluetooth(
         self, discovery_info: BluetoothServiceInfoBleak
-    ) -> dict:
+    ) -> ConfigFlowResult:
         """Handle device found via automatic BLE discovery."""
         await self.async_set_unique_id(discovery_info.address)
         self._abort_if_unique_id_configured()
@@ -34,7 +34,7 @@ class BleHeartRateConfigFlow(ConfigFlow, domain=DOMAIN):
 
     async def async_step_bluetooth_confirm(
         self, user_input: dict | None = None
-    ) -> dict:
+    ) -> ConfigFlowResult:
         """Confirm Bluetooth discovery."""
         if user_input is not None:
             assert self._discovery_info is not None
@@ -58,7 +58,7 @@ class BleHeartRateConfigFlow(ConfigFlow, domain=DOMAIN):
             description_placeholders={"name": name},
         )
 
-    async def async_step_user(self, user_input: dict | None = None) -> dict:
+    async def async_step_user(self, user_input: dict | None = None) -> ConfigFlowResult:
         """Handle user-initiated setup (manual selection)."""
         if user_input is not None:
             address = user_input[CONF_ADDRESS]

@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 import math
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import timedelta
 from time import monotonic
 from typing import Any
@@ -21,8 +21,13 @@ from .const import HR_MEASUREMENT_CHAR, BATTERY_LEVEL_CHAR
 _LOGGER = logging.getLogger(__name__)
 
 RECONNECT_INTERVAL = timedelta(seconds=60)
+CONNECT_TIMEOUT = 15  # seconds — HA recommends ≥10s for BLE
 HRV_WINDOW_SECONDS = 300  # 5-minute sliding window for RMSSD
 HRV_MIN_INTERVALS = 10  # minimum RR intervals needed for a meaningful RMSSD
+
+# Minimum packet lengths for parsing validation
+_MIN_LEN_HR8 = 2  # flags + 1-byte HR
+_MIN_LEN_HR16 = 3  # flags + 2-byte HR
 
 
 @dataclass
@@ -62,8 +67,10 @@ def parse_hr_measurement(data: bytes | bytearray) -> dict[str, Any]:
         Bit 3: Energy expended present
         Bit 4: RR-Interval present
       Byte 1+: HR value, optional energy, optional RR intervals
+
+    Returns empty dict if data is missing or truncated.
     """
-    if not data:
+    if not data or len(data) < _MIN_LEN_HR8:
         return {}
 
     flags = data[0]
@@ -71,6 +78,11 @@ def parse_hr_measurement(data: bytes | bytearray) -> dict[str, Any]:
     contact_bits = (flags >> 1) & 0x03
     energy_present = bool(flags & 0x08)
     rr_present = bool(flags & 0x10)
+
+    # Validate minimum length for the HR format
+    min_len = _MIN_LEN_HR16 if hr_16bit else _MIN_LEN_HR8
+    if len(data) < min_len:
+        return {}
 
     offset = 1
 
@@ -87,17 +99,17 @@ def parse_hr_measurement(data: bytes | bytearray) -> dict[str, Any]:
     if contact_bits >= 2:
         sensor_contact = bool(contact_bits & 0x01)
 
-    # Energy expended (UINT16 LE, kJ)
+    # Energy expended (UINT16 LE, kJ) — need 2 full bytes
     energy_expended = None
-    if energy_present and offset + 1 < len(data):
+    if energy_present and offset + 2 <= len(data):
         energy_expended = int.from_bytes(data[offset : offset + 2], "little")
         offset += 2
 
-    # RR intervals (UINT16 LE each, units of 1/1024 seconds)
+    # RR intervals (UINT16 LE each, units of 1/1024 seconds) — need 2 full bytes each
     rr_intervals = None
     if rr_present:
         rr_intervals = []
-        while offset + 1 < len(data):
+        while offset + 2 <= len(data):
             rr_raw = int.from_bytes(data[offset : offset + 2], "little")
             rr_ms = round(rr_raw * 1000 / 1024)
             rr_intervals.append(rr_ms)
@@ -167,7 +179,15 @@ class BleHeartRateCoordinator(DataUpdateCoordinator[HeartRateData]):
                 self.address,
                 disconnected_callback=self._on_disconnect,
                 max_attempts=2,
+                timeout=CONNECT_TIMEOUT,
             )
+
+            # Check if disabled or already disconnected during await
+            if not self.enabled or not client.is_connected:
+                if client.is_connected:
+                    await client.disconnect()
+                return
+
             self._client = client
 
             # Subscribe to HR measurement notifications
@@ -223,8 +243,9 @@ class BleHeartRateCoordinator(DataUpdateCoordinator[HeartRateData]):
 
         self.async_set_updated_data(self.data)
 
+    @callback
     def _on_disconnect(self, client: BleakClient) -> None:
-        """Handle BLE disconnect."""
+        """Handle BLE disconnect (called on event loop by bleak)."""
         _LOGGER.info("Disconnected from %s (%s)", self.device_name, self.address)
         self._client = None
         self._rr_history.clear()
@@ -233,13 +254,19 @@ class BleHeartRateCoordinator(DataUpdateCoordinator[HeartRateData]):
         self.data.rr_intervals = None
         self.data.sensor_contact = None
         self.data.hrv_rmssd = None
-        self.hass.loop.call_soon_threadsafe(self.async_set_updated_data, self.data)
+        self.async_set_updated_data(self.data)
 
     async def async_disconnect(self) -> None:
         """Disconnect from device (called on unload)."""
-        if self._client:
+        client = self._client
+        self._client = None  # prevent _on_disconnect from double-processing
+        if client:
             try:
-                await self._client.disconnect()
+                await client.disconnect()
             except BleakError:
                 pass
-            self._client = None
+
+    async def async_request_connect(self) -> None:
+        """Public method to trigger a connection attempt."""
+        if not self._client and not self._connecting:
+            await self._connect()
