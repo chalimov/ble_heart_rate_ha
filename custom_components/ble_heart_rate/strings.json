@@ -22,6 +22,7 @@
     "sensor": {
       "heart_rate": { "name": "Heart Rate" },
       "rr_interval": { "name": "RR Interval" },
+      "hrv": { "name": "HRV (RMSSD)" },
       "sensor_contact": { "name": "Sensor Contact" },
       "battery": { "name": "Battery" }
     }

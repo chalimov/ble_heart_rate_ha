@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+import math
+from collections import deque
+from dataclasses import dataclass, field
 from datetime import timedelta
+from time import monotonic
 from typing import Any
 
 from bleak import BleakClient, BleakError
@@ -18,6 +21,8 @@ from .const import HR_MEASUREMENT_CHAR, BATTERY_LEVEL_CHAR
 _LOGGER = logging.getLogger(__name__)
 
 RECONNECT_INTERVAL = timedelta(seconds=60)
+HRV_WINDOW_SECONDS = 300  # 5-minute sliding window for RMSSD
+HRV_MIN_INTERVALS = 10  # minimum RR intervals needed for a meaningful RMSSD
 
 
 @dataclass
@@ -25,11 +30,26 @@ class HeartRateData:
     """Data from heart rate monitor."""
 
     heart_rate: int | None = None
-    rr_intervals: list[int] | None = None  # milliseconds
+    rr_intervals: list[int] | None = None  # milliseconds (current notification)
     sensor_contact: bool | None = None  # None = feature not supported
     energy_expended: int | None = None  # kJ
     battery_level: int | None = None
+    hrv_rmssd: float | None = None  # RMSSD in ms
     connected: bool = False
+
+
+def compute_rmssd(rr_values: list[int]) -> float | None:
+    """Compute RMSSD (Root Mean Square of Successive Differences) in ms.
+
+    Requires at least HRV_MIN_INTERVALS RR intervals.
+    """
+    if len(rr_values) < HRV_MIN_INTERVALS:
+        return None
+    diffs_sq = [
+        (rr_values[i + 1] - rr_values[i]) ** 2
+        for i in range(len(rr_values) - 1)
+    ]
+    return round(math.sqrt(sum(diffs_sq) / len(diffs_sq)), 1)
 
 
 def parse_hr_measurement(data: bytes | bytearray) -> dict[str, Any]:
@@ -107,6 +127,8 @@ class BleHeartRateCoordinator(DataUpdateCoordinator[HeartRateData]):
         self.data = HeartRateData()
         self._client: BleakClient | None = None
         self._connecting = False
+        # Sliding window of (timestamp, rr_ms) for HRV calculation
+        self._rr_history: deque[tuple[float, int]] = deque()
 
     async def _async_update_data(self) -> HeartRateData:
         """Periodic reconnection attempt if disconnected."""
@@ -185,16 +207,31 @@ class BleHeartRateCoordinator(DataUpdateCoordinator[HeartRateData]):
         self.data.sensor_contact = parsed["sensor_contact"]
         self.data.energy_expended = parsed["energy_expended"]
         self.data.connected = True
+
+        # Accumulate RR intervals for HRV and compute RMSSD
+        if parsed["rr_intervals"]:
+            now = monotonic()
+            for rr in parsed["rr_intervals"]:
+                self._rr_history.append((now, rr))
+            # Trim to sliding window
+            cutoff = now - HRV_WINDOW_SECONDS
+            while self._rr_history and self._rr_history[0][0] < cutoff:
+                self._rr_history.popleft()
+            rr_values = [rr for _, rr in self._rr_history]
+            self.data.hrv_rmssd = compute_rmssd(rr_values)
+
         self.async_set_updated_data(self.data)
 
     def _on_disconnect(self, client: BleakClient) -> None:
         """Handle BLE disconnect."""
         _LOGGER.info("Disconnected from %s (%s)", self.device_name, self.address)
         self._client = None
+        self._rr_history.clear()
         self.data.connected = False
         self.data.heart_rate = None
         self.data.rr_intervals = None
         self.data.sensor_contact = None
+        self.data.hrv_rmssd = None
         self.hass.loop.call_soon_threadsafe(self.async_set_updated_data, self.data)
 
     async def async_disconnect(self) -> None:

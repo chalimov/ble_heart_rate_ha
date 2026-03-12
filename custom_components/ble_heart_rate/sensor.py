@@ -33,6 +33,14 @@ SENSOR_DESCRIPTIONS = [
         entity_registry_enabled_default=False,
     ),
     SensorEntityDescription(
+        key="hrv",
+        translation_key="hrv",
+        native_unit_of_measurement="ms",
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:heart-flash",
+        suggested_display_precision=1,
+    ),
+    SensorEntityDescription(
         key="sensor_contact",
         translation_key="sensor_contact",
         icon="mdi:connection",
@@ -103,6 +111,8 @@ class BleHeartRateSensor(
             if data.sensor_contact is False:
                 return "Not Detected"
             return None
+        if key == "hrv":
+            return data.hrv_rmssd
         if key == "battery":
             return data.battery_level
         return None
