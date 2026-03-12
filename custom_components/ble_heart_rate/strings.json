@@ -1,0 +1,29 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Select Heart Rate Monitor",
+        "description": "Choose your BLE heart rate monitor from the list of discovered devices.",
+        "data": {
+          "address": "Device"
+        }
+      },
+      "bluetooth_confirm": {
+        "title": "Confirm Setup",
+        "description": "Set up {name} as a heart rate monitor?"
+      }
+    },
+    "abort": {
+      "no_devices_found": "No BLE heart rate monitors found nearby. Make sure your device is active (chest strap worn, or sensor activated).",
+      "already_configured": "This device is already configured."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "heart_rate": { "name": "Heart Rate" },
+      "rr_interval": { "name": "RR Interval" },
+      "sensor_contact": { "name": "Sensor Contact" },
+      "battery": { "name": "Battery" }
+    }
+  }
+}
