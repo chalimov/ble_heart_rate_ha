@@ -25,6 +25,9 @@
       "hrv": { "name": "HRV (RMSSD)" },
       "sensor_contact": { "name": "Sensor Contact" },
       "battery": { "name": "Battery" }
+    },
+    "switch": {
+      "connect": { "name": "Connect" }
     }
   }
 }

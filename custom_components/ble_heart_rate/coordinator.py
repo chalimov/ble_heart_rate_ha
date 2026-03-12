@@ -127,12 +127,13 @@ class BleHeartRateCoordinator(DataUpdateCoordinator[HeartRateData]):
         self.data = HeartRateData()
         self._client: BleakClient | None = None
         self._connecting = False
+        self.enabled = True  # controlled by the Connect switch
         # Sliding window of (timestamp, rr_ms) for HRV calculation
         self._rr_history: deque[tuple[float, int]] = deque()
 
     async def _async_update_data(self) -> HeartRateData:
         """Periodic reconnection attempt if disconnected."""
-        if not self._client and not self._connecting:
+        if self.enabled and not self._client and not self._connecting:
             await self._connect()
         return self.data
 
@@ -143,7 +144,7 @@ class BleHeartRateCoordinator(DataUpdateCoordinator[HeartRateData]):
         change: bluetooth.BluetoothChange,
     ) -> None:
         """Handle BLE advertisement — trigger connection if not connected."""
-        if not self._client and not self._connecting:
+        if self.enabled and not self._client and not self._connecting:
             self.hass.async_create_task(self._connect())
 
     async def _connect(self) -> None:
