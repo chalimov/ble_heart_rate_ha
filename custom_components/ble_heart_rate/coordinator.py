@@ -24,6 +24,7 @@ RECONNECT_INTERVAL = timedelta(seconds=60)
 CONNECT_TIMEOUT = 15  # seconds — HA recommends ≥10s for BLE
 HRV_WINDOW_SECONDS = 300  # 5-minute sliding window for RMSSD
 HRV_MIN_INTERVALS = 10  # minimum RR intervals needed for a meaningful RMSSD
+BATTERY_REFRESH_INTERVAL = 600  # re-read battery every 10 minutes
 
 # Minimum packet lengths for parsing validation
 _MIN_LEN_HR8 = 2  # flags + 1-byte HR
@@ -140,12 +141,19 @@ class BleHeartRateCoordinator(DataUpdateCoordinator[HeartRateData]):
         self._client: BleakClient | None = None
         self._connecting = False
         self.enabled = True  # controlled by the Connect switch
+        self._setup_complete = False  # set True after switch restore
         # Sliding window of (timestamp, rr_ms) for HRV calculation
         self._rr_history: deque[tuple[float, int]] = deque()
+        self._last_battery_read: float = 0.0
 
     async def _async_update_data(self) -> HeartRateData:
         """Periodic reconnection attempt if disconnected."""
-        if self.enabled and not self._client and not self._connecting:
+        if (
+            self._setup_complete
+            and self.enabled
+            and not self._client
+            and not self._connecting
+        ):
             await self._connect()
         return self.data
 
@@ -156,7 +164,12 @@ class BleHeartRateCoordinator(DataUpdateCoordinator[HeartRateData]):
         change: bluetooth.BluetoothChange,
     ) -> None:
         """Handle BLE advertisement — trigger connection if not connected."""
-        if self.enabled and not self._client and not self._connecting:
+        if (
+            self._setup_complete
+            and self.enabled
+            and not self._client
+            and not self._connecting
+        ):
             self.hass.async_create_task(self._connect())
 
     async def _connect(self) -> None:
@@ -204,6 +217,7 @@ class BleHeartRateCoordinator(DataUpdateCoordinator[HeartRateData]):
             try:
                 battery_data = await client.read_gatt_char(BATTERY_LEVEL_CHAR)
                 self.data.battery_level = battery_data[0]
+                self._last_battery_read = monotonic()
             except Exception:  # noqa: BLE001
                 _LOGGER.debug("Battery service not available on %s", self.address)
 
@@ -230,8 +244,8 @@ class BleHeartRateCoordinator(DataUpdateCoordinator[HeartRateData]):
         self.data.connected = True
 
         # Accumulate RR intervals for HRV and compute RMSSD
+        now = monotonic()
         if parsed["rr_intervals"]:
-            now = monotonic()
             for rr in parsed["rr_intervals"]:
                 self._rr_history.append((now, rr))
             # Trim to sliding window
@@ -240,6 +254,14 @@ class BleHeartRateCoordinator(DataUpdateCoordinator[HeartRateData]):
                 self._rr_history.popleft()
             rr_values = [rr for _, rr in self._rr_history]
             self.data.hrv_rmssd = compute_rmssd(rr_values)
+
+        # Periodically re-read battery level
+        if (
+            self._client
+            and now - self._last_battery_read > BATTERY_REFRESH_INTERVAL
+        ):
+            self._last_battery_read = now
+            self.hass.async_create_task(self._read_battery())
 
         self.async_set_updated_data(self.data)
 
@@ -257,7 +279,7 @@ class BleHeartRateCoordinator(DataUpdateCoordinator[HeartRateData]):
         self.async_set_updated_data(self.data)
 
     async def async_disconnect(self) -> None:
-        """Disconnect from device (called on unload)."""
+        """Disconnect from device (called on unload or switch-off)."""
         client = self._client
         self._client = None  # prevent _on_disconnect from double-processing
         if client:
@@ -265,6 +287,22 @@ class BleHeartRateCoordinator(DataUpdateCoordinator[HeartRateData]):
                 await client.disconnect()
             except BleakError:
                 pass
+        # Always clear data — don't rely on disconnect callback firing
+        self._rr_history.clear()
+        self.data = HeartRateData()
+        self.async_set_updated_data(self.data)
+
+    async def _read_battery(self) -> None:
+        """Re-read battery level from the device."""
+        client = self._client
+        if not client or not client.is_connected:
+            return
+        try:
+            battery_data = await client.read_gatt_char(BATTERY_LEVEL_CHAR)
+            self.data.battery_level = battery_data[0]
+            self.async_set_updated_data(self.data)
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug("Battery re-read failed on %s", self.address)
 
     async def async_request_connect(self) -> None:
         """Public method to trigger a connection attempt."""

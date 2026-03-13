@@ -46,6 +46,8 @@ class BleHeartRateSwitch(RestoreEntity, SwitchEntity):
         last_state = await self.async_get_last_state()
         if last_state is not None and last_state.state == "off":
             self._coordinator.enabled = False
+        # Signal that switch state is restored — safe to start connecting
+        self._coordinator._setup_complete = True
 
     @property
     def is_on(self) -> bool:
