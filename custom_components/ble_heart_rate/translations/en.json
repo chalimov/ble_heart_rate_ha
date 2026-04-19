@@ -23,6 +23,17 @@
       "heart_rate": { "name": "Heart Rate" },
       "rr_interval": { "name": "RR Interval" },
       "hrv": { "name": "HRV (RMSSD)" },
+      "hrv_score": { "name": "HRV Score" },
+      "hrv_dfa_alpha1": { "name": "HRV DFA α1" },
+      "training_zone": {
+        "name": "Training Zone",
+        "state": {
+          "recovery": "Recovery",
+          "aerobic": "Aerobic",
+          "threshold": "Threshold",
+          "anaerobic": "Anaerobic"
+        }
+      },
       "sensor_contact": { "name": "Sensor Contact" },
       "battery": { "name": "Battery" }
     },

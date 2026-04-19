@@ -31,6 +31,7 @@ SENSOR_DESCRIPTIONS = [
         state_class=SensorStateClass.MEASUREMENT,
         icon="mdi:chart-line-variant",
         entity_registry_enabled_default=False,
+        suggested_display_precision=0,
     ),
     SensorEntityDescription(
         key="hrv",
@@ -39,6 +40,29 @@ SENSOR_DESCRIPTIONS = [
         state_class=SensorStateClass.MEASUREMENT,
         icon="mdi:heart-flash",
         suggested_display_precision=1,
+    ),
+    SensorEntityDescription(
+        key="hrv_score",
+        translation_key="hrv_score",
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:heart-plus",
+        suggested_display_precision=0,
+    ),
+    SensorEntityDescription(
+        key="hrv_dfa_alpha1",
+        translation_key="hrv_dfa_alpha1",
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:chart-sine-variant",
+        suggested_display_precision=3,
+        entity_registry_enabled_default=False,
+    ),
+    SensorEntityDescription(
+        key="training_zone",
+        translation_key="training_zone",
+        device_class=SensorDeviceClass.ENUM,
+        options=["recovery", "aerobic", "threshold", "anaerobic"],
+        icon="mdi:speedometer",
+        entity_registry_enabled_default=False,
     ),
     SensorEntityDescription(
         key="sensor_contact",
@@ -113,6 +137,12 @@ class BleHeartRateSensor(
             return None
         if key == "hrv":
             return data.hrv_rmssd
+        if key == "hrv_score":
+            return data.hrv_score
+        if key == "hrv_dfa_alpha1":
+            return data.hrv_dfa_alpha1
+        if key == "training_zone":
+            return data.training_zone
         if key == "battery":
             return data.battery_level
         return None
@@ -125,7 +155,7 @@ class BleHeartRateSensor(
         data: HeartRateData = self.coordinator.data
         attrs: dict[str, Any] = {}
         if data.rr_intervals:
-            attrs["rr_intervals_ms"] = data.rr_intervals
+            attrs["rr_intervals_ms"] = [round(r, 1) for r in data.rr_intervals]
         if data.sensor_contact is not None:
             attrs["sensor_contact"] = data.sensor_contact
         if data.energy_expended is not None:
