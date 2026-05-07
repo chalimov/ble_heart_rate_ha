@@ -18,7 +18,13 @@ from homeassistant.components import bluetooth
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
-from .const import HR_MEASUREMENT_CHAR, BATTERY_LEVEL_CHAR
+from .const import (
+    HR_MEASUREMENT_CHAR,
+    BATTERY_LEVEL_CHAR,
+    ZONE_RECOVERY_HRR,
+    ZONE_AEROBIC_HRR,
+    ZONE_THRESHOLD_HRR,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -38,14 +44,14 @@ RR_MAX_REL_CHANGE = 0.20  # reject RR differing >20% from last valid RR
 DFA_MIN_BEATS = 64  # min valid beats for a meaningful α1
 DFA_MAX_BEATS = 240  # rolling window length; ≈2 min at 120 bpm
 DFA_BOX_SIZES = tuple(range(4, 17))  # n ∈ {4..16} defines "short-term" α1
-# Training-zone thresholds mapping α1 → intensity band.
-# α1 ≥ 1.0: correlated, low-intensity/rest
-# 0.75 ≤ α1 < 1.0: easy/aerobic (below VT1)
-# 0.5 ≤ α1 < 0.75: threshold (between VT1 and VT2)
-# α1 < 0.5: anaerobic (above VT2), trending toward uncorrelated/white noise
-ZONE_AEROBIC_THRESHOLD = 0.75
-ZONE_ANAEROBIC_THRESHOLD = 0.5
-ZONE_RECOVERY_THRESHOLD = 1.0
+# Guard against the flat-signal failure mode: when RR variability is tiny,
+# integrating ~zero-mean noise yields Brownian motion and α1 → 1.5, the same
+# fingerprint as deep rest. This collapses high-intensity exercise into the
+# "recovery" band. Reject the result when σ(RR) is below DFA_MIN_RR_STD_MS,
+# or when the computed α1 exceeds DFA_MAX_PLAUSIBLE_ALPHA (a real autonomic
+# state shouldn't be this Brownian-correlated).
+DFA_MIN_RR_STD_MS = 5.0
+DFA_MAX_PLAUSIBLE_ALPHA = 1.3
 
 # Minimum packet lengths for parsing validation
 _MIN_LEN_HR8 = 2  # flags + 1-byte HR
@@ -135,13 +141,17 @@ def compute_dfa_alpha1(rr_ms: list[float]) -> float | None:
 
     Physiology (Rogers & Gronwald): α1 drops monotonically with exercise
     intensity — ~1.0 at rest, ~0.75 at aerobic threshold (VT1), ~0.5 at
-    anaerobic threshold (VT2). Returns None if the window is too short or
-    the signal is flat (F(n)=0, undefined log).
+    anaerobic threshold (VT2). Returns None if the window is too short,
+    the signal is flat (F(n)=0, undefined log), σ(RR) is too small to
+    distinguish from quantization noise, or the computed α1 is implausibly
+    high (Brownian-noise fingerprint of a near-flat RR series).
     """
     n_beats = len(rr_ms)
     if n_beats < DFA_MIN_BEATS:
         return None
     rr = np.asarray(rr_ms[-DFA_MAX_BEATS:], dtype=np.float64)
+    if float(rr.std()) < DFA_MIN_RR_STD_MS:
+        return None
     y = np.cumsum(rr - rr.mean())
 
     log_n: list[float] = []
@@ -170,18 +180,41 @@ def compute_dfa_alpha1(rr_ms: list[float]) -> float | None:
     if len(log_n) < 3:
         return None
     slope, _ = np.polyfit(np.array(log_n), np.array(log_F), 1)
-    return round(float(slope), 3)
-
-
-def classify_training_zone(alpha1: float | None) -> str | None:
-    """Map DFA α1 to a training-intensity zone per Rogers & Gronwald thresholds."""
-    if alpha1 is None:
+    alpha1 = float(slope)
+    if alpha1 > DFA_MAX_PLAUSIBLE_ALPHA:
         return None
-    if alpha1 >= ZONE_RECOVERY_THRESHOLD:
+    return round(alpha1, 3)
+
+
+def classify_hr_zone(
+    hr: int | None, hrmax: int, hrrest: int | None
+) -> str | None:
+    """Map current HR to a 4-zone training band via the Karvonen HRR formula.
+
+    %HRR = (HR − HRrest) / (HRmax − HRrest); thresholds 60/75/90 split the
+    response into recovery / aerobic / threshold / anaerobic. %HRR maps to
+    %VO2-reserve along the line of identity (Swain & Leutholtz 1997), which
+    is why HRR-based zones are the prescription standard.
+
+    If HRrest is unset (None), falls back to %HRmax with the same boundaries
+    so the integration still produces meaningful zones without calibration.
+    """
+    if hr is None or hrmax <= 0:
+        return None
+    if hrrest is not None and hrrest >= hrmax:
+        return None
+    if hrrest is None:
+        ratio = hr / hrmax
+    else:
+        reserve = hrmax - hrrest
+        if reserve <= 0:
+            return None
+        ratio = (hr - hrrest) / reserve
+    if ratio < ZONE_RECOVERY_HRR:
         return "recovery"
-    if alpha1 >= ZONE_AEROBIC_THRESHOLD:
+    if ratio < ZONE_AEROBIC_HRR:
         return "aerobic"
-    if alpha1 >= ZONE_ANAEROBIC_THRESHOLD:
+    if ratio < ZONE_THRESHOLD_HRR:
         return "threshold"
     return "anaerobic"
 
@@ -257,7 +290,14 @@ def parse_hr_measurement(data: bytes | bytearray) -> dict[str, Any]:
 class BleHeartRateCoordinator(DataUpdateCoordinator[HeartRateData]):
     """Coordinator for BLE Heart Rate Monitor."""
 
-    def __init__(self, hass: HomeAssistant, address: str, name: str) -> None:
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        address: str,
+        name: str,
+        hrmax: int,
+        hrrest: int | None,
+    ) -> None:
         """Initialize."""
         super().__init__(
             hass,
@@ -267,6 +307,8 @@ class BleHeartRateCoordinator(DataUpdateCoordinator[HeartRateData]):
         )
         self.address = address
         self.device_name = name
+        self.hrmax = hrmax
+        self.hrrest = hrrest
         self.data = HeartRateData()
         self._client: BleakClient | None = None
         self._connecting = False
@@ -277,6 +319,16 @@ class BleHeartRateCoordinator(DataUpdateCoordinator[HeartRateData]):
         self._rr_history: deque[tuple[float, float, bool]] = deque()
         self._last_valid_rr: float | None = None
         self._last_battery_read: float = 0.0
+
+    def update_zone_params(self, hrmax: int, hrrest: int | None) -> None:
+        """Update HRmax/HRrest from the options flow without reconnecting."""
+        self.hrmax = hrmax
+        self.hrrest = hrrest
+        # Re-classify with last known HR so the sensor refreshes immediately.
+        self.data.training_zone = classify_hr_zone(
+            self.data.heart_rate, self.hrmax, self.hrrest
+        )
+        self.async_set_updated_data(self.data)
 
     async def _async_update_data(self) -> HeartRateData:
         """Periodic reconnection attempt if disconnected."""
@@ -393,12 +445,18 @@ class BleHeartRateCoordinator(DataUpdateCoordinator[HeartRateData]):
                 self._rr_history.popleft()
             self.data.hrv_rmssd = compute_rmssd(list(self._rr_history))
             self.data.hrv_score = compute_hrv_score(self.data.hrv_rmssd)
-            # DFA α1 is beat-indexed, not time-indexed, and uses only valid NN
+            # DFA α1 is beat-indexed, not time-indexed, and uses only valid NN.
+            # It stays a numeric-only sensor (Altini / Frontiers 2024: not
+            # reliable enough for live zone classification on chest-strap
+            # data), but is still useful for tracking durability/fatigue.
             valid_rrs = [rr for _, rr, v in self._rr_history if v]
             self.data.hrv_dfa_alpha1 = compute_dfa_alpha1(valid_rrs)
-            self.data.training_zone = classify_training_zone(
-                self.data.hrv_dfa_alpha1
-            )
+
+        # Zone is HR-derived (Karvonen HRR), updated every notification even
+        # when the packet has no RR payload — HR alone is enough.
+        self.data.training_zone = classify_hr_zone(
+            self.data.heart_rate, self.hrmax, self.hrrest
+        )
 
         # Periodically re-read battery level
         if (

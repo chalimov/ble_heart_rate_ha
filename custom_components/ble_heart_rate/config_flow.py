@@ -1,22 +1,43 @@
 """Config flow for BLE Heart Rate Monitor."""
 from __future__ import annotations
 
+from typing import Any
+
 import voluptuous as vol
 
 from homeassistant.components.bluetooth import (
     BluetoothServiceInfoBleak,
     async_discovered_service_info,
 )
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
+from homeassistant.config_entries import (
+    ConfigEntry,
+    ConfigFlow,
+    ConfigFlowResult,
+    OptionsFlow,
+)
 from homeassistant.const import CONF_ADDRESS, CONF_NAME
+from homeassistant.core import callback
 
-from .const import DOMAIN, HR_SERVICE_UUID
+from .const import (
+    CONF_HRMAX,
+    CONF_HRREST,
+    DEFAULT_HRMAX,
+    DEFAULT_HRREST,
+    DOMAIN,
+    HR_SERVICE_UUID,
+)
 
 
 class BleHeartRateConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle config flow for BLE Heart Rate Monitor."""
 
     VERSION = 1
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlow:
+        """Return the options flow handler."""
+        return BleHeartRateOptionsFlow(config_entry)
 
     def __init__(self) -> None:
         """Initialize."""
@@ -89,6 +110,38 @@ class BleHeartRateConfigFlow(ConfigFlow, domain=DOMAIN):
                             for addr, info in self._discovered_devices.items()
                         }
                     ),
+                }
+            ),
+        )
+
+
+class BleHeartRateOptionsFlow(OptionsFlow):
+    """Options flow: HRmax / HRrest for HR-zone classification."""
+
+    def __init__(self, config_entry: ConfigEntry) -> None:
+        """Initialize."""
+        self.config_entry = config_entry
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Single-step form for HRmax/HRrest."""
+        if user_input is not None:
+            return self.async_create_entry(title="", data=user_input)
+
+        current = self.config_entry.options
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_HRMAX,
+                        default=current.get(CONF_HRMAX, DEFAULT_HRMAX),
+                    ): vol.All(vol.Coerce(int), vol.Range(min=100, max=220)),
+                    vol.Required(
+                        CONF_HRREST,
+                        default=current.get(CONF_HRREST, DEFAULT_HRREST),
+                    ): vol.All(vol.Coerce(int), vol.Range(min=30, max=100)),
                 }
             ),
         )

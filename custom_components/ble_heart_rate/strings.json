@@ -18,6 +18,18 @@
       "already_configured": "This device is already configured."
     }
   },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Heart Rate Zones",
+        "description": "Configure your heart rate zones using the Karvonen (heart-rate-reserve) method. %HRR = (HR − HRrest) / (HRmax − HRrest). Zones: <60% recovery, 60–75% aerobic, 75–90% threshold, ≥90% anaerobic.",
+        "data": {
+          "hrmax": "Maximum heart rate (bpm)",
+          "hrrest": "Resting heart rate (bpm)"
+        }
+      }
+    }
+  },
   "entity": {
     "sensor": {
       "heart_rate": { "name": "Heart Rate" },
